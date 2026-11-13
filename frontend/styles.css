@@ -22,6 +22,9 @@
 
 * { box-sizing: border-box; }
 
+/* .panel usa display:flex, que anularía el atributo hidden */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -218,7 +221,11 @@ select:hover, .btn:hover:not(:disabled) { border-color: #3a4456; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; padding: 12px; }
+  /* En móvil la página crece con su contenido (sin solaparse con la barra inferior) */
+  .layout { grid-template-columns: 1fr; padding: 12px; flex: none; }
+  .side { min-height: auto; }
+  .console-panel { flex: none; }
+  .console { max-height: 45vh; min-height: 200px; }
   .topbar { padding: 10px 12px; }
   .editor-panel, #code, .CodeMirror { min-height: 300px; }
   .hint { display: none; }

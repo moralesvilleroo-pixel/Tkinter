@@ -217,9 +217,13 @@ while True:
         write(ev.data, "stderr");
         break;
       case "frame":
-        ctx.hadGui = true;
-        els.screenPanel.hidden = false;
         els.screen.src = `data:image/png;base64,${ev.data}`;
+        if (!ctx.hadGui) {
+          // Primera captura: mostrar el panel y llevarlo a la vista (útil en móvil)
+          ctx.hadGui = true;
+          els.screenPanel.hidden = false;
+          els.screenPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
         break;
       case "exit": {
         ctx.finished = true;

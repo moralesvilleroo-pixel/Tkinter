@@ -15,6 +15,8 @@ procesos, etc.) los impone el backend antes de lanzar el proceso.
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import hashlib
 import io
 import os
@@ -25,23 +27,136 @@ import time
 import traceback
 
 
+# ---------------------------------------------------------------------------
+# Captura de pantalla
+# ---------------------------------------------------------------------------
+class XlibGrabber:
+    """
+    Captura la pantalla con libX11 vía ctypes (XGetImage).
+
+    No depende de que Pillow se haya compilado con soporte XCB: usa la misma
+    libX11 que ya carga Tkinter, así que si Tk puede abrir una ventana, esto
+    puede capturarla. Pillow solo se usa para codificar el PNG.
+    """
+
+    ZPIXMAP = 2
+    ALL_PLANES = ctypes.c_ulong(0xFFFFFFFF)
+
+    class _XImage(ctypes.Structure):
+        _fields_ = [
+            ("width", ctypes.c_int), ("height", ctypes.c_int),
+            ("xoffset", ctypes.c_int), ("format", ctypes.c_int),
+            ("data", ctypes.c_void_p),
+            ("byte_order", ctypes.c_int), ("bitmap_unit", ctypes.c_int),
+            ("bitmap_bit_order", ctypes.c_int), ("bitmap_pad", ctypes.c_int),
+            ("depth", ctypes.c_int), ("bytes_per_line", ctypes.c_int),
+            ("bits_per_pixel", ctypes.c_int),
+            ("red_mask", ctypes.c_ulong), ("green_mask", ctypes.c_ulong),
+            ("blue_mask", ctypes.c_ulong), ("obdata", ctypes.c_void_p),
+            # struct funcs: create_image, destroy_image, get_pixel, put_pixel,
+            # sub_image, add_pixel
+            ("f_create", ctypes.c_void_p), ("f_destroy", ctypes.c_void_p),
+            ("f_get", ctypes.c_void_p), ("f_put", ctypes.c_void_p),
+            ("f_sub", ctypes.c_void_p), ("f_add", ctypes.c_void_p),
+        ]
+
+    def __init__(self, display: str | None) -> None:
+        from PIL import Image  # solo para construir/codificar la imagen
+
+        self._Image = Image
+        name = ctypes.util.find_library("X11") or "libX11.so.6"
+        x = ctypes.CDLL(name)
+        x.XOpenDisplay.restype = ctypes.c_void_p
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x.XDefaultScreen.argtypes = [ctypes.c_void_p]
+        x.XRootWindow.restype = ctypes.c_ulong
+        x.XRootWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x.XGetImage.restype = ctypes.POINTER(self._XImage)
+        x.XGetImage.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int,
+        ]
+        self._x = x
+
+        self._dpy = x.XOpenDisplay(display.encode() if display else None)
+        if not self._dpy:
+            raise RuntimeError(f"no se pudo abrir el display {display!r}")
+        screen = x.XDefaultScreen(self._dpy)
+        self._root = x.XRootWindow(self._dpy, screen)
+        self._w = x.XDisplayWidth(self._dpy, screen)
+        self._h = x.XDisplayHeight(self._dpy, screen)
+
+    def grab(self):
+        ptr = self._x.XGetImage(self._dpy, self._root, 0, 0, self._w, self._h,
+                                self.ALL_PLANES, self.ZPIXMAP)
+        if not ptr:
+            raise RuntimeError("XGetImage devolvió NULL")
+        img = ptr.contents
+        try:
+            if img.bits_per_pixel != 32:
+                raise RuntimeError(f"profundidad no soportada: {img.bits_per_pixel} bpp")
+            raw = ctypes.string_at(img.data, img.bytes_per_line * img.height)
+            # Xvfb a 24 bits guarda los píxeles como B, G, R, X (little endian)
+            return self._Image.frombuffer(
+                "RGB", (img.width, img.height), raw, "raw", "BGRX", img.bytes_per_line, 1
+            )
+        finally:
+            # XDestroyImage es una macro de C: llamamos al puntero de la estructura
+            destroy = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)(img.f_destroy)
+            destroy(ctypes.cast(ptr, ctypes.c_void_p))
+
+
+class PillowGrabber:
+    """Respaldo: ImageGrab de Pillow (requiere Pillow compilado con XCB)."""
+
+    def __init__(self, display: str | None) -> None:
+        from PIL import ImageGrab
+
+        self._grab = ImageGrab.grab
+        self._display = display
+        self.grab()  # falla aquí si Pillow no tiene soporte XCB
+
+    def grab(self):
+        return self._grab(xdisplay=self._display)
+
+
+def _make_grabber(display: str | None):
+    errors = []
+    for cls in (XlibGrabber, PillowGrabber):
+        try:
+            return cls(display)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{cls.__name__}: {exc}")
+    raise RuntimeError("; ".join(errors))
+
+
+def _warn(msg: str) -> None:
+    """Aviso del sandbox por stderr (visible en la consola del usuario)."""
+    try:
+        sys.stderr.write(f"[sandbox] {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _capture_loop(frames_dir: str, interval: float) -> None:
     """Captura la pantalla del display X actual cada `interval` segundos."""
-    try:
-        from PIL import ImageGrab  # Pillow con soporte XCB
-    except Exception:  # pragma: no cover - depende del entorno
-        sys.__stderr__.write("[sandbox] Pillow no disponible: vista gráfica desactivada\n")
-        return
-
     display = os.environ.get("DISPLAY")
     target = os.path.join(frames_dir, "latest.png")
     tmp = os.path.join(frames_dir, ".latest.tmp")
     last_digest = None
+    grabber = None
+    failures = 0
 
     while True:
         time.sleep(interval)
         try:
-            img = ImageGrab.grab(xdisplay=display)
+            if grabber is None:
+                grabber = _make_grabber(display)
+
+            img = grabber.grab()
             # Sin gestor de ventanas el fondo es negro (-br): recortamos al
             # área ocupada por las ventanas para que la vista sea compacta.
             bbox = img.getbbox()
@@ -50,7 +165,7 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
             img = img.crop(bbox)
 
             buf = io.BytesIO()
-            img.save(buf, format="PNG", optimize=False)
+            img.save(buf, format="PNG", compress_level=3)
             data = buf.getvalue()
 
             # Solo escribimos si la imagen cambió (ahorra ancho de banda).
@@ -63,9 +178,15 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
             with open(tmp, "wb") as fh:
                 fh.write(data)
             os.replace(tmp, target)
-        except Exception:
-            # El display puede desaparecer al terminar; no es un error del usuario.
-            continue
+            failures = 0
+        except Exception as exc:  # noqa: BLE001
+            # Al terminar el programa el display desaparece: eso es normal.
+            # Si falla varias veces seguidas, avisamos una vez y desistimos.
+            failures += 1
+            grabber = None
+            if failures == 3:
+                _warn(f"vista gráfica no disponible ({exc})")
+                return
 
 
 def _print_user_traceback(exc: BaseException) -> None:
