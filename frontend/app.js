@@ -138,6 +138,8 @@ while True:
     desktop: $("desktop"),
     desktopEmpty: $("desktop-empty"),
     guiTimer: $("gui-timer"),
+    kbd: $("kbd"),
+    kbdBtn: $("btn-kbd"),
     fullscreen: $("btn-fullscreen"),
     metaExit: $("meta-exit"),
     metaTime: $("meta-time"),
@@ -227,6 +229,133 @@ while True:
     els.metaTime.textContent = "—";
   }
 
+  // ---------- Envío de ratón y teclado al servidor ----------
+  /**
+   * Cola ordenada de eventos hacia POST /api/input/{run_id}. Los movimientos
+   * consecutivos se fusionan (solo importa la última posición) y se envía un
+   * lote a la vez para conservar el orden.
+   */
+  const RemoteInput = {
+    runId: null,
+    queue: [],
+    busy: false,
+
+    push(ev) {
+      if (!this.runId) return;
+      const last = this.queue[this.queue.length - 1];
+      if (ev.t === "move" && last && last.t === "move") this.queue[this.queue.length - 1] = ev;
+      else this.queue.push(ev);
+      this.flush();
+    },
+
+    async flush() {
+      if (this.busy) return;
+      this.busy = true;
+      while (this.queue.length && this.runId) {
+        const batch = this.queue.splice(0, 100);
+        try {
+          const res = await fetch(`${API}/api/input/${encodeURIComponent(this.runId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ events: batch }),
+          });
+          if (res.status === 404) { this.runId = null; this.queue = []; }
+        } catch { /* red caída: se descarta el lote */ }
+      }
+      this.busy = false;
+    },
+
+    stop() { this.runId = null; this.queue = []; },
+  };
+
+  // Teclas especiales del navegador -> nombres de tecla de X11
+  const X_KEYS = {
+    Enter: "Return", Backspace: "BackSpace", Tab: "Tab", Escape: "Escape",
+    Delete: "Delete", Insert: "Insert", Home: "Home", End: "End",
+    PageUp: "Prior", PageDown: "Next",
+    ArrowLeft: "Left", ArrowRight: "Right", ArrowUp: "Up", ArrowDown: "Down",
+    F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6",
+    F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12",
+  };
+
+  /**
+   * Teclado: un textarea invisible recibe el foco.
+   *  - Teclado físico: se usa keydown (teclas especiales, atajos, caracteres).
+   *  - Teclado del celular (keydown "Unidentified"/229, autocorrector): se
+   *    compara el texto antes/después de cada "input" y se envían las letras
+   *    nuevas y los borrados como BackSpace.
+   */
+  const Keyboard = (() => {
+    const SENTINEL = "\u200b"; // carácter invisible: permite detectar "borrar" con el texto vacío
+    let prev = SENTINEL;
+    let composing = false;
+
+    const reset = () => { els.kbd.value = SENTINEL; prev = SENTINEL; };
+    reset();
+
+    function sendText(text) {
+      text.split(/(\n)/).forEach((part) => {
+        if (part === "\n") RemoteInput.push({ t: "key", k: "Return" });
+        else if (part) RemoteInput.push({ t: "text", s: part });
+      });
+    }
+
+    els.kbd.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") {
+        return; // lo resolverá el evento "input"
+      }
+      const mods = [];
+      if (e.ctrlKey) mods.push("Control");
+      if (e.altKey) mods.push("Alt");
+      if (e.metaKey) mods.push("Meta");
+
+      if (X_KEYS[e.key]) {
+        if (e.shiftKey) mods.push("Shift");
+        RemoteInput.push({ t: "key", k: X_KEYS[e.key], mods });
+        e.preventDefault();
+      } else if (e.key.length === 1) {
+        if (mods.length) RemoteInput.push({ t: "key", k: e.key, mods });
+        else RemoteInput.push({ t: "text", s: e.key });
+        e.preventDefault();
+      }
+    });
+
+    els.kbd.addEventListener("compositionstart", () => { composing = true; });
+    els.kbd.addEventListener("compositionend", () => {
+      composing = false;
+      if (els.kbd.value.length > 64) reset();
+    });
+
+    els.kbd.addEventListener("input", () => {
+      const now = els.kbd.value;
+      let i = 0;
+      while (i < prev.length && i < now.length && prev[i] === now[i]) i++;
+      for (let d = 0; d < prev.length - i; d++) RemoteInput.push({ t: "key", k: "BackSpace" });
+      const inserted = now.slice(i).replaceAll(SENTINEL, "");
+      if (inserted) sendText(inserted);
+      prev = now;
+      if (!now.startsWith(SENTINEL) || (!composing && now.length > 64)) reset();
+    });
+
+    els.kbd.addEventListener("focus", () => {
+      els.desktopWrap.classList.add("typing");
+      els.kbdBtn.classList.add("on");
+    });
+    els.kbd.addEventListener("blur", () => {
+      els.desktopWrap.classList.remove("typing");
+      els.kbdBtn.classList.remove("on");
+      reset();
+    });
+
+    return {
+      focus() { els.kbd.focus({ preventScroll: true }); },
+      toggle() {
+        if (document.activeElement === els.kbd) els.kbd.blur();
+        else els.kbd.focus({ preventScroll: true });
+      },
+    };
+  })();
+
   // ---------- Ventanas Tkinter ----------
   /**
    * Dibuja cada ventana del programa con un marco al estilo de Tkinter en
@@ -262,9 +391,71 @@ while True:
       win.querySelector(".tk-min").onclick = () => { win.classList.toggle("minimized"); fit(); };
       win.querySelector(".tk-max").onclick = toggleFullscreen;
       win.querySelector(".tk-close").onclick = () => stop();
+      attachPointer(win, win.querySelector(".tk-client"));
       nodes.set(id, win);
       els.desktop.appendChild(win);
       return win;
+    }
+
+    /**
+     * Ratón / dedo sobre el contenido de una ventana. Convierte la posición
+     * en pantalla (con el escalado aplicado) a coordenadas del display virtual.
+     */
+    function attachPointer(win, client) {
+      let pressed = 0;
+      let lastHover = 0;
+
+      const toScreen = (e) => {
+        const r = client.getBoundingClientRect();
+        const g = win._geo;
+        const k = g.w / r.width; // deshace el escalado del escritorio
+        return {
+          x: Math.round(g.sx + (e.clientX - r.left) * k),
+          y: Math.round(g.sy + (e.clientY - r.top) * k),
+        };
+      };
+
+      client.addEventListener("pointerdown", (e) => {
+        if (!win._geo) return;
+        e.preventDefault();
+        client.setPointerCapture(e.pointerId);
+        pressed = e.button === 1 ? 2 : e.button === 2 ? 3 : 1; // 1 izq, 2 medio, 3 der
+        const p = toScreen(e);
+        RemoteInput.push({ t: "move", ...p });
+        RemoteInput.push({ t: "down", b: pressed, ...p });
+        // Con ratón damos foco al teclado; en táctil se abre con el botón ⌨
+        if (e.pointerType === "mouse") Keyboard.focus();
+      });
+
+      client.addEventListener("pointermove", (e) => {
+        if (!win._geo) return;
+        const now = performance.now();
+        if (!pressed) {
+          if (e.pointerType !== "mouse" || now - lastHover < 80) return; // hover: con moderación
+          lastHover = now;
+        }
+        RemoteInput.push({ t: "move", ...toScreen(e) });
+      });
+
+      const release = (e) => {
+        if (!pressed || !win._geo) return;
+        RemoteInput.push({ t: "up", b: pressed, ...toScreen(e) });
+        pressed = 0;
+      };
+      client.addEventListener("pointerup", release);
+      client.addEventListener("pointercancel", release);
+      client.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      let wheelAcc = 0;
+      client.addEventListener("wheel", (e) => {
+        if (!win._geo) return;
+        e.preventDefault();
+        wheelAcc += e.deltaY;
+        if (Math.abs(wheelAcc) >= 40) {
+          RemoteInput.push({ t: "wheel", dy: Math.sign(wheelAcc), ...toScreen(e) });
+          wheelAcc = 0;
+        }
+      }, { passive: false });
     }
 
     /** Escala el escritorio para que quepa en el panel (sin agrandar en modo normal). */
@@ -312,6 +503,8 @@ while True:
         win.classList.toggle("active", w.id === activeId);
         win.querySelector(".tk-titlebar").hidden = !w.decorated;
         win.querySelector(".tk-title").textContent = w.title || "tk";
+        // Origen de la ventana en el display virtual (para mapear clics)
+        win._geo = { sx: (frame.left || 0) + w.x, sy: (frame.top || 0) + w.y, w: w.w };
         win.style.left = `${w.x}px`;
         win.style.top = `${w.y}px`;
         win.style.zIndex = String(z + 1);
@@ -384,6 +577,7 @@ while True:
   function handleEvent(ev, ctx) {
     switch (ev.type) {
       case "start":
+        RemoteInput.runId = ev.run_id;
         write(`$ python main.py   (límite: ${ev.timeout}s)\n`, "system");
         break;
       case "stdout":
@@ -409,6 +603,8 @@ while True:
         break;
       case "exit": {
         ctx.finished = true;
+        RemoteInput.stop();
+        els.kbd.blur();
         guiDeadline = 0;
         els.guiTimer.hidden = true;
         els.desktop.classList.add("ended");
@@ -491,6 +687,7 @@ while True:
         setStatus("error", "Error de conexión");
       }
     } finally {
+      RemoteInput.stop();
       stopClock();
       setRunning(false);
       controller = null;
@@ -520,6 +717,9 @@ while True:
   els.stop.addEventListener("click", stop);
   els.clear.addEventListener("click", () => { if (!controller) clearOutput(); else els.console.textContent = ""; });
   els.fullscreen.addEventListener("click", () => WindowManager.toggleFullscreen());
+  // pointerdown sin foco: así el botón no le quita el foco al teclado
+  els.kbdBtn.addEventListener("pointerdown", (e) => e.preventDefault());
+  els.kbdBtn.addEventListener("click", () => Keyboard.toggle());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && els.screenPanel.classList.contains("fullscreen")) {
       WindowManager.toggleFullscreen();

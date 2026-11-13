@@ -68,12 +68,16 @@
         <div class="panel-head">
           <span class="panel-title">Ventanas</span>
           <span id="gui-timer" class="gui-timer" hidden></span>
+          <button id="btn-kbd" class="icon-btn" title="Abrir teclado" aria-label="Abrir teclado">⌨</button>
           <button id="btn-fullscreen" class="icon-btn" title="Pantalla completa" aria-label="Pantalla completa">⤢</button>
         </div>
         <!-- "Escritorio" donde se dibuja cada ventana Tkinter con su marco -->
         <div class="desktop-wrap" id="desktop-wrap">
           <div class="desktop" id="desktop" role="img" aria-label="Ventanas del programa"></div>
           <p class="desktop-empty" id="desktop-empty" hidden>Todas las ventanas se cerraron.</p>
+          <!-- Recibe el teclado (físico o del celular) y lo reenvía a la ventana -->
+          <textarea id="kbd" class="kbd-proxy" autocapitalize="off" autocomplete="off"
+                    autocorrect="off" spellcheck="false" aria-label="Teclado para la ventana"></textarea>
         </div>
       </div>
       <div class="panel console-panel">

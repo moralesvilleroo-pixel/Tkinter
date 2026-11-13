@@ -209,6 +209,17 @@ select:hover, .btn:hover:not(:disabled) { border-color: #3a4456; }
   font-size: 15px;
 }
 .gui-timer[hidden] + .icon-btn { margin-left: auto; }
+.icon-btn.on { color: var(--accent); border-color: var(--accent); }
+
+/* Textarea invisible que capta el teclado; font-size 16px evita el zoom en iOS */
+.kbd-proxy {
+  position: absolute; left: 0; bottom: 0;
+  width: 1px; height: 1px;
+  opacity: 0; border: 0; padding: 0; resize: none;
+  font-size: 16px;
+  pointer-events: none;
+}
+.desktop-wrap.typing { box-shadow: inset 0 0 0 2px var(--accent); }
 .icon-btn:hover { color: var(--text); border-color: #3a4456; }
 
 .desktop-wrap {
@@ -274,6 +285,8 @@ select:hover, .btn:hover:not(:disabled) { border-color: #3a4456; }
 .tk-client {
   background-image: var(--frame);
   background-repeat: no-repeat;
+  cursor: default;
+  touch-action: none; /* el dedo controla la ventana, no desplaza la página */
 }
 .tkwin.minimized .tk-client { display: none; }
 

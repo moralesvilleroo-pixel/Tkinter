@@ -27,6 +27,8 @@ import codecs
 import contextlib
 import json
 import os
+import re
+import secrets
 import shutil
 import signal
 import sys
@@ -45,6 +47,70 @@ except ImportError:  # pragma: no cover
 
 class ServerBusyError(RuntimeError):
     """No hay displays libres en el tiempo de espera configurado."""
+
+
+class RunNotFoundError(LookupError):
+    """La ejecución no existe o ya terminó."""
+
+
+# ---------------------------------------------------------------------------
+# Entrada del usuario (ratón y teclado) hacia las ventanas
+# ---------------------------------------------------------------------------
+# run_id (secreto, solo lo conoce el cliente que lanzó la ejecución) -> archivo
+# input.jsonl que el proceso capture.py lee e inyecta en la pantalla virtual.
+_active_runs: dict[str, dict] = {}
+
+MAX_INPUT_BYTES_PER_RUN = 2_000_000
+_KEY_NAME = re.compile(r"^[A-Za-z0-9_]{1,24}$")
+_MODS = {"Shift", "Control", "Alt", "Meta"}
+
+
+def _clean_event(ev: dict) -> dict | None:
+    """Valida y normaliza una orden de entrada. Devuelve None si no es válida."""
+    if not isinstance(ev, dict):
+        return None
+    kind = ev.get("t")
+    try:
+        if kind in ("move", "down", "up", "wheel"):
+            out = {"t": kind, "x": int(ev["x"]), "y": int(ev["y"])}
+            if not (-10_000 < out["x"] < 10_000 and -10_000 < out["y"] < 10_000):
+                return None
+            if kind in ("down", "up"):
+                out["b"] = int(ev.get("b", 1))
+                if out["b"] not in (1, 2, 3):
+                    return None
+            if kind == "wheel":
+                out["dy"] = -1 if float(ev.get("dy", 1)) < 0 else 1
+            return out
+        if kind == "key":
+            k = str(ev["k"])
+            if not (len(k) == 1 or _KEY_NAME.match(k)):
+                return None
+            mods = [m for m in ev.get("mods", []) if m in _MODS]
+            return {"t": "key", "k": k, "mods": mods}
+        if kind == "text":
+            text = str(ev["s"])[:500]
+            return {"t": "text", "s": text} if text else None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def send_input(run_id: str, events: list) -> int:
+    """Añade órdenes válidas al input.jsonl de la ejecución. Devuelve cuántas."""
+    run = _active_runs.get(run_id)
+    if run is None:
+        raise RunNotFoundError("La ejecución no existe o ya terminó.")
+    lines = [json.dumps(c, ensure_ascii=False) for c in map(_clean_event, events) if c]
+    if not lines:
+        return 0
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    if run["bytes"] + len(data) > MAX_INPUT_BYTES_PER_RUN:
+        raise RunNotFoundError("Límite de entrada alcanzado para esta ejecución.")
+    with open(run["path"], "ab") as fh:
+        fh.write(data)
+    run["bytes"] += len(data)
+    return len(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -167,11 +233,12 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
     """
     Ejecuta `code` y produce eventos:
 
-        {"type": "start",  "display": 100, "timeout": 10}
+        {"type": "start",  "run_id": "...", "display": 100, "timeout": 10}
         {"type": "stdout", "data": "..."}
         {"type": "stderr", "data": "..."}
         {"type": "gui",    "timeout": 120}          # se detectó una ventana
         {"type": "frame",  "data": "<png base64>" | None, "width": W, "height": H,
+                           "left": X0, "top": Y0,
                            "windows": [{"title", "x", "y", "w", "h", "decorated"}]}
         {"type": "exit",   "exit_code": 0, "timed_out": False, "cpu_exceeded": False,
                            "truncated": False, "duration": 1.23}
@@ -187,6 +254,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
 
     display = await display_pool.acquire(settings.queue_wait_seconds)
     workdir = tempfile.mkdtemp(prefix="pyrun-")
+    run_id = secrets.token_urlsafe(18)
     proc: asyncio.subprocess.Process | None = None
     stderr_transport: asyncio.ReadTransport | None = None
     events: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -197,6 +265,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
         script.write_text(code, encoding="utf-8")
         frames_dir = Path(workdir) / "frames"
         frames_dir.mkdir()
+        _active_runs[run_id] = {"path": frames_dir / "input.jsonl", "bytes": 0}
 
         # xvfb-run ejecuta el comando con "2>&1", lo que mezclaría stderr con
         # stdout. Para conservarlos separados abrimos un pipe extra que el
@@ -225,7 +294,8 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
             lambda: asyncio.StreamReaderProtocol(user_stderr),
             os.fdopen(err_read, "rb", buffering=0),
         )
-        yield {"type": "start", "display": display, "timeout": settings.timeout_seconds,
+        yield {"type": "start", "run_id": run_id, "display": display,
+               "timeout": settings.timeout_seconds,
                "gui_timeout": settings.gui_timeout_seconds}
 
         state = {"bytes": 0, "truncated": False}
@@ -259,7 +329,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
             latest = frames_dir / "latest.json"
             last_mtime = 0
             while True:
-                await asyncio.sleep(settings.frame_interval / 2)
+                await asyncio.sleep(0.05)  # stat() es barato: baja latencia
                 try:
                     mtime = latest.stat().st_mtime_ns
                 except FileNotFoundError:
@@ -278,6 +348,8 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
                     "data": frame.get("png"),
                     "width": frame.get("width", 0),
                     "height": frame.get("height", 0),
+                    "left": frame.get("left", 0),
+                    "top": frame.get("top", 0),
                     "windows": frame.get("windows", []),
                 })
 
@@ -354,6 +426,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
             yield event
 
     finally:
+        _active_runs.pop(run_id, None)
         for t in tasks:
             t.cancel()
         if proc is not None:

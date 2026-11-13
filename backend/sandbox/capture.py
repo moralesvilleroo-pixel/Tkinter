@@ -9,8 +9,14 @@ Corre en un proceso APARTE del script del usuario por dos motivos:
   * Su consumo de CPU no cuenta contra el límite de CPU del script.
 
 Cada `intervalo` segundos escribe <frames_dir>/latest.json con:
-    {"png": <base64>, "width": W, "height": H,
+    {"png": <base64>, "width": W, "height": H, "left": X0, "top": Y0,
      "windows": [{"id", "title", "x", "y", "w", "h", "decorated"}, ...]}
+(x/y de cada ventana son relativos a left/top, el origen de la captura).
+
+Además, un hilo lee <frames_dir>/input.jsonl, donde el backend añade los
+clics y teclas del navegador, y los inyecta con XTEST (ver x11input.py).
+Tras cada interacción se captura enseguida para que la respuesta se note.
+
 Termina solo cuando el display desaparece o su proceso padre muere.
 """
 from __future__ import annotations
@@ -23,7 +29,11 @@ import io
 import json
 import os
 import sys
+import threading
 import time
+
+# Con -I (modo aislado) la carpeta del script no está en sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ---------------------------------------------------------------------------
 # Acceso a X11 mediante ctypes
@@ -222,6 +232,47 @@ def _write_atomic(path: str, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+# Despierta el bucle de captura cuando llega una interacción del usuario
+_wake = threading.Event()
+_last_input = 0.0
+
+
+def _input_loop(frames_dir: str) -> None:
+    """Sigue input.jsonl (como `tail -f`) e inyecta cada orden en el display."""
+    global _last_input
+    from x11input import Injector
+
+    path = os.path.join(frames_dir, "input.jsonl")
+    display = os.environ.get("DISPLAY")
+    injector = None
+    pos = 0
+    pending = b""
+    while True:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(pos)
+                chunk = fh.read()
+        except FileNotFoundError:
+            chunk = b""
+        if not chunk:
+            time.sleep(0.015)
+            continue
+        pos += len(chunk)
+        lines = (pending + chunk).split(b"\n")
+        pending = lines.pop()  # última línea incompleta (si la hay)
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                if injector is None:
+                    injector = Injector(display)
+                injector.handle(json.loads(line))
+            except Exception as exc:  # noqa: BLE001
+                _warn(f"entrada ignorada ({exc})")
+        _last_input = time.monotonic()
+        _wake.set()
+
+
 def _capture_loop(frames_dir: str, interval: float) -> None:
     """
     Cada `interval` segundos:
@@ -240,7 +291,11 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
 
     parent = os.getppid()
     while True:
-        time.sleep(interval)
+        # Durante 1.5 s tras una interacción capturamos más seguido
+        fast = time.monotonic() - _last_input < 1.5
+        if _wake.wait(0.1 if fast else interval):
+            _wake.clear()
+            time.sleep(0.04)  # dar tiempo a Tk para redibujar
         if os.getppid() != parent:
             return  # el runner terminó: no seguir vivo
         try:
@@ -253,7 +308,7 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
                     had_windows = False
                     last_digest = None
                     _write_atomic(target, {"png": None, "width": 0, "height": 0,
-                                           "windows": []})
+                                           "left": 0, "top": 0, "windows": []})
                 continue
 
             left = min(w["x"] for w in wins)
@@ -282,6 +337,8 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
                 "png": base64.b64encode(buf.getvalue()).decode("ascii"),
                 "width": width,
                 "height": height,
+                "left": left,
+                "top": top,
                 "windows": meta,
             })
             had_windows = True
@@ -299,6 +356,10 @@ def _capture_loop(frames_dir: str, interval: float) -> None:
 
 def main() -> int:
     frames_dir, interval = sys.argv[1], float(sys.argv[2])
+    # Dos hilos usan Xlib (captura y entrada): hay que activar su modo seguro
+    lib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+    lib.XInitThreads()
+    threading.Thread(target=_input_loop, args=(frames_dir,), daemon=True).start()
     _capture_loop(frames_dir, interval)
     return 0
 

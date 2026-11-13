@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-tk \
-        xvfb xauth \
+        xvfb xauth libxtst6 \
         fonts-dejavu-core fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
