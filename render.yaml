@@ -1,0 +1,14 @@
+# Despliegue del backend en Render (Blueprint). Render construye el Dockerfile.
+services:
+  - type: web
+    name: pyrunner-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: RUN_TIMEOUT
+        value: "10"
+      - key: MAX_CONCURRENT_RUNS
+        value: "2"
+      - key: CORS_ORIGINS
+        value: "https://TU-SITIO.netlify.app"   # cámbialo por tu dominio de Netlify

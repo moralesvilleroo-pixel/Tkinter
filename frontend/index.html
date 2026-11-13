@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PyRunner · Python + Tkinter online</title>
+
+  <!-- Fuentes -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- CodeMirror 5: editor con resaltado de Python (si el CDN falla, queda un textarea) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js" defer></script>
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <!--
+    URL del backend. Vacía = mismo origen (cuando FastAPI sirve este frontend).
+    Si alojas el frontend aparte, ponla aquí, p. ej. "https://api.midominio.com".
+  -->
+  <script>window.API_BASE = "";</script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">▶</span>
+      <h1>PyRunner</h1>
+      <span class="tag">Python 3 · Tkinter</span>
+    </div>
+
+    <div class="actions">
+      <select id="examples" aria-label="Cargar ejemplo">
+        <option value="">Ejemplos…</option>
+        <option value="hello">Hola mundo</option>
+        <option value="tk_counter">Tkinter: contador</option>
+        <option value="tk_canvas">Tkinter: Canvas</option>
+        <option value="stream">Salida en tiempo real</option>
+        <option value="error">Error (traceback)</option>
+        <option value="infinite">Bucle infinito (timeout)</option>
+      </select>
+      <button id="btn-clear" class="btn ghost" title="Limpiar consola">Limpiar</button>
+      <button id="btn-stop" class="btn danger" disabled title="Detener ejecución">■ Detener</button>
+      <button id="btn-run" class="btn primary" title="Ejecutar (Ctrl/⌘ + Enter)">▶ Ejecutar</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Editor -->
+    <section class="panel editor-panel">
+      <div class="panel-head">
+        <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+        <span class="panel-title">main.py</span>
+        <span class="hint">Ctrl/⌘ + Enter para ejecutar</span>
+      </div>
+      <textarea id="code" spellcheck="false" aria-label="Editor de código Python"></textarea>
+    </section>
+
+    <!-- Salida -->
+    <section class="side">
+      <div class="panel console-panel">
+        <div class="panel-head">
+          <span class="panel-title">Consola</span>
+          <span id="status" class="status idle">Listo</span>
+        </div>
+        <pre id="console" class="console" aria-live="polite"></pre>
+      </div>
+
+      <div class="panel screen-panel" id="screen-panel" hidden>
+        <div class="panel-head">
+          <span class="panel-title">Pantalla virtual (Tkinter)</span>
+          <span class="hint">Vista en vivo · solo lectura</span>
+        </div>
+        <div class="screen">
+          <img id="screen" alt="Captura de la ventana Tkinter" />
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="meta-exit">—</span>
+    <span id="meta-time">—</span>
+    <span id="meta-server" class="right">Servidor: comprobando…</span>
+  </footer>
+</body>
+</html>

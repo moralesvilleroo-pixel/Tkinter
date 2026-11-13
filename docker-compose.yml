@@ -1,0 +1,22 @@
+services:
+  pyrunner:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      RUN_TIMEOUT: "10"            # segundos máximos por ejecución
+      MAX_CONCURRENT_RUNS: "4"     # ejecuciones simultáneas (un display X c/u)
+      MEMORY_LIMIT_MB: "1024"      # memoria virtual por proceso
+      CORS_ORIGINS: "*"            # en producción: tu dominio
+    # --- Endurecimiento del contenedor ---
+    init: true                     # tini recoge procesos zombi (Xvfb terminados)
+    read_only: true                # sistema de archivos de solo lectura...
+    tmpfs:
+      - /tmp:size=256m,mode=1777   # ...salvo /tmp (código y capturas temporales)
+    pids_limit: 256                # freno a fork bombs
+    mem_limit: 2g
+    cpus: 2
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
