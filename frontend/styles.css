@@ -191,23 +191,98 @@ select:hover, .btn:hover:not(:disabled) { border-color: #3a4456; }
 
 @keyframes pulse { 50% { opacity: 0.5; } }
 
-/* ---------- Pantalla virtual ---------- */
-.screen {
-  padding: 16px;
-  display: grid; place-items: center;
-  background:
-    linear-gradient(45deg, #121722 25%, transparent 25%) 0 0 / 16px 16px,
-    linear-gradient(45deg, transparent 75%, #121722 75%) 0 0 / 16px 16px,
-    #0f141d;
-  overflow: auto;
-  max-height: 420px;
+/* ---------- Escritorio con ventanas Tkinter ---------- */
+.screen-panel { flex: none; }
+.gui-timer {
+  margin-left: auto;
+  font: 600 12px var(--mono);
+  color: var(--warn);
 }
-.screen img {
-  max-width: 100%;
+.icon-btn {
+  margin-left: 8px;
+  width: 28px; height: 28px;
   border-radius: 6px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-  image-rendering: auto;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
 }
+.gui-timer[hidden] + .icon-btn { margin-left: auto; }
+.icon-btn:hover { color: var(--text); border-color: #3a4456; }
+
+.desktop-wrap {
+  position: relative;
+  padding: 18px;
+  overflow: hidden;
+  background:
+    radial-gradient(800px 400px at 20% 0%, rgba(79, 140, 255, 0.35), transparent 60%),
+    radial-gradient(600px 400px at 100% 100%, rgba(124, 92, 255, 0.3), transparent 60%),
+    #0e1626;
+}
+.desktop {
+  position: relative;
+  transform-origin: top left;
+  transition: opacity 0.3s, filter 0.3s;
+}
+.desktop.ended { opacity: 0.55; filter: grayscale(0.6); }
+.desktop-empty {
+  margin: 0; padding: 30px 0;
+  text-align: center; color: var(--muted); font-size: 13px;
+}
+
+/* Marco de ventana con aspecto de Tkinter en Windows 11 */
+.tkwin {
+  position: absolute;
+  background: #f0f0f0;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.35);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+.tkwin.plain { border-radius: 0; border: 0; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); }
+
+.tk-titlebar {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  background: #ffffff;
+  color: #1b1b1b;
+  font-size: 12px;
+  user-select: none;
+}
+.tkwin:not(.active) .tk-titlebar { background: #f3f3f3; color: #8a8a8a; }
+.tk-icon { width: 16px; height: 16px; margin: 0 8px 0 10px; flex: none; }
+.tk-title {
+  flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tk-buttons { display: flex; height: 100%; flex: none; }
+.tk-buttons button {
+  width: 46px; height: 100%;
+  border: 0; padding: 0;
+  background: transparent;
+  color: inherit;
+  display: grid; place-items: center;
+  cursor: pointer;
+}
+.tk-buttons button:hover { background: rgba(0, 0, 0, 0.07); }
+.tk-buttons .tk-close:hover { background: #c42b1c; color: #fff; }
+.tk-buttons svg { width: 10px; height: 10px; }
+
+.tk-client {
+  background-image: var(--frame);
+  background-repeat: no-repeat;
+}
+.tkwin.minimized .tk-client { display: none; }
+
+/* Pantalla completa para ver mejor la ventana (sobre todo en el celular) */
+.screen-panel.fullscreen {
+  position: fixed; inset: 0; z-index: 100;
+  border-radius: 0;
+}
+.screen-panel.fullscreen .desktop-wrap { flex: 1; }
 
 /* ---------- Barra de estado ---------- */
 .statusbar {
@@ -222,7 +297,7 @@ select:hover, .btn:hover:not(:disabled) { border-color: #3a4456; }
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
   /* En móvil la página crece con su contenido (sin solaparse con la barra inferior) */
-  .layout { grid-template-columns: 1fr; padding: 12px; flex: none; }
+  .layout { grid-template-columns: minmax(0, 1fr); padding: 12px; flex: none; }
   .side { min-height: auto; }
   .console-panel { flex: none; }
   .console { max-height: 45vh; min-height: 200px; }

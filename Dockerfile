@@ -2,6 +2,8 @@
 # PyRunner: FastAPI + Xvfb + Tkinter
 # Se usa el Python de Debian porque trae tkinter (python3-tk); la imagen
 # python:*-slim compila Python sin las librerías Tk en tiempo de ejecución.
+# fonts-liberation: equivalentes métricos de Arial/Times/Courier, para que
+# font=("Arial", 14) se vea parecido a Windows.
 # ------------------------------------------------------------------
 FROM debian:bookworm-slim
 
@@ -12,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-tk \
         xvfb xauth \
-        fonts-dejavu-core \
+        fonts-dejavu-core fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Entorno virtual (hereda tkinter de la stdlib del sistema)

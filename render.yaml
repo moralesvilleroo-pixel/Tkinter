@@ -8,6 +8,10 @@ services:
     envVars:
       - key: RUN_TIMEOUT
         value: "10"
+      - key: GUI_TIMEOUT
+        value: "120"
+      - key: CPU_LIMIT
+        value: "20"
       - key: MAX_CONCURRENT_RUNS
         value: "2"
       - key: CORS_ORIGINS

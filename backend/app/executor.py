@@ -10,7 +10,9 @@ Flujo de una ejecución:
     4. Se leen stdout / stderr en paralelo y se emiten como eventos.
     5. Se vigila frames/latest.png y se emite cada captura nueva (base64).
     6. Si vence el timeout o la salida es excesiva, se mata TODO el grupo de
-       procesos (script + Xvfb): primero SIGTERM, luego SIGKILL.
+       procesos (script + Xvfb): primero SIGTERM, luego SIGKILL. Cuando el
+       programa abre una ventana, el límite pasa de RUN_TIMEOUT a GUI_TIMEOUT
+       (el límite de CPU sigue frenando los bucles infinitos).
     7. Se libera el display y se borra el directorio temporal.
 
 La API pública son dos funciones:
@@ -23,6 +25,7 @@ import asyncio
 import base64
 import codecs
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -93,10 +96,11 @@ def _apply_limits() -> None:
     if resource is None:
         return
     mb = 1024 * 1024
-    cpu = int(settings.timeout_seconds) + 2  # tiempo de CPU (seg.)
+    cpu = settings.cpu_limit_seconds  # segundos de CPU por proceso
 
     limits = [
-        (resource.RLIMIT_CPU, (cpu, cpu)),
+        # Límite blando < duro: al superar el blando llega SIGXCPU (detectable)
+        (resource.RLIMIT_CPU, (cpu, cpu + 2)),
         (resource.RLIMIT_AS, (settings.memory_limit_mb * mb,) * 2),
         (resource.RLIMIT_FSIZE, (settings.file_size_limit_mb * mb,) * 2),
         (resource.RLIMIT_CORE, (0, 0)),
@@ -166,8 +170,10 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
         {"type": "start",  "display": 100, "timeout": 10}
         {"type": "stdout", "data": "..."}
         {"type": "stderr", "data": "..."}
-        {"type": "frame",  "data": "<png base64>"}
-        {"type": "exit",   "exit_code": 0, "timed_out": False,
+        {"type": "gui",    "timeout": 120}          # se detectó una ventana
+        {"type": "frame",  "data": "<png base64>" | None, "width": W, "height": H,
+                           "windows": [{"title", "x", "y", "w", "h", "decorated"}]}
+        {"type": "exit",   "exit_code": 0, "timed_out": False, "cpu_exceeded": False,
                            "truncated": False, "duration": 1.23}
 
     Si el consumidor deja de iterar (p. ej. el cliente cierra la conexión),
@@ -175,7 +181,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
     """
     if shutil.which("xvfb-run") is None:
         yield {"type": "stderr", "data": "Error del servidor: xvfb-run no está instalado.\n"}
-        yield {"type": "exit", "exit_code": -1, "timed_out": False,
+        yield {"type": "exit", "exit_code": -1, "timed_out": False, "cpu_exceeded": False,
                "truncated": False, "duration": 0.0}
         return
 
@@ -219,10 +225,12 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
             lambda: asyncio.StreamReaderProtocol(user_stderr),
             os.fdopen(err_read, "rb", buffering=0),
         )
-        yield {"type": "start", "display": display, "timeout": settings.timeout_seconds}
+        yield {"type": "start", "display": display, "timeout": settings.timeout_seconds,
+               "gui_timeout": settings.gui_timeout_seconds}
 
         state = {"bytes": 0, "truncated": False}
         output_limit_hit = asyncio.Event()
+        gui_detected = asyncio.Event()
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
             """Lee un pipe en bloques y lo reenvía como eventos de texto."""
@@ -247,8 +255,8 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
                     await events.put({"type": kind, "data": text})
 
         async def watch_frames() -> None:
-            """Envía cada nueva captura de la pantalla virtual."""
-            latest = frames_dir / "latest.png"
+            """Envía cada nueva captura (imagen + ventanas) de la pantalla virtual."""
+            latest = frames_dir / "latest.json"
             last_mtime = 0
             while True:
                 await asyncio.sleep(settings.frame_interval / 2)
@@ -259,31 +267,66 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
                 if mtime == last_mtime:
                     continue
                 last_mtime = mtime
-                with contextlib.suppress(OSError):
-                    data = latest.read_bytes()
-                    await events.put({"type": "frame",
-                                      "data": base64.b64encode(data).decode("ascii")})
+                try:
+                    frame = json.loads(latest.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if frame.get("windows"):
+                    gui_detected.set()
+                await events.put({
+                    "type": "frame",
+                    "data": frame.get("png"),
+                    "width": frame.get("width", 0),
+                    "height": frame.get("height", 0),
+                    "windows": frame.get("windows", []),
+                })
 
         async def supervise() -> None:
-            """Espera el fin del proceso, el timeout o el exceso de salida."""
-            timed_out = False
+            """
+            Espera el fin del proceso, el exceso de salida o el timeout. El
+            plazo empieza en RUN_TIMEOUT y se amplía a GUI_TIMEOUT (contado
+            desde el inicio) cuando aparece la primera ventana.
+            """
             waiter = asyncio.create_task(proc.wait())
             limiter = asyncio.create_task(output_limit_hit.wait())
-            done, _ = await asyncio.wait(
-                {waiter, limiter},
-                timeout=settings.timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if waiter not in done:
-                timed_out = limiter not in done
+            gui_task = asyncio.create_task(gui_detected.wait())
+            deadline = started + settings.timeout_seconds
+            timed_out = False
+
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                watch = {waiter, limiter} | ({gui_task} if not gui_task.done() else set())
+                done, _ = await asyncio.wait(watch, timeout=remaining,
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if waiter in done or limiter in done:
+                    break
+                if gui_task in done:
+                    deadline = max(deadline, started + settings.gui_timeout_seconds)
+                    await events.put({"type": "gui",
+                                      "timeout": settings.gui_timeout_seconds})
+
+            if not waiter.done():
                 await _terminate_group(proc)
-            limiter.cancel()
+            for t in (limiter, gui_task):
+                t.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)  # vaciar pipes
 
+            # xvfb-run devuelve 128 + señal cuando el script muere por una señal
+            cpu_exceeded = not timed_out and proc.returncode in (
+                128 + signal.SIGXCPU, -signal.SIGXCPU)
+
             if timed_out:
+                limit = (settings.gui_timeout_seconds if gui_detected.is_set()
+                         else settings.timeout_seconds)
                 await events.put({"type": "stderr", "data":
-                    f"\n⏱ Tiempo límite excedido ({settings.timeout_seconds:g} s). "
-                    "Proceso detenido.\n"})
+                    f"\n⏱ Tiempo límite excedido ({limit:g} s). Proceso detenido.\n"})
+            if cpu_exceeded:
+                await events.put({"type": "stderr", "data":
+                    f"\n🔥 Límite de CPU excedido ({settings.cpu_limit_seconds} s de cálculo). "
+                    "¿Hay un bucle infinito?\n"})
             if state["truncated"]:
                 await events.put({"type": "stderr", "data":
                     "\n✂ Salida demasiado larga: ejecución detenida.\n"})
@@ -291,6 +334,7 @@ async def stream_execution(code: str) -> AsyncIterator[dict]:
                 "type": "exit",
                 "exit_code": proc.returncode,
                 "timed_out": timed_out,
+                "cpu_exceeded": cpu_exceeded,
                 "truncated": state["truncated"],
                 "duration": round(time.monotonic() - started, 3),
             })
@@ -333,7 +377,7 @@ async def run_to_completion(code: str) -> dict:
             stdout.append(event["data"])
         elif kind == "stderr":
             stderr.append(event["data"])
-        elif kind == "frame":
+        elif kind == "frame" and event.get("data"):
             last_frame = event["data"]
         elif kind == "exit":
             result = event
@@ -343,6 +387,7 @@ async def run_to_completion(code: str) -> dict:
         "stderr": "".join(stderr),
         "exit_code": result.get("exit_code"),
         "timed_out": result.get("timed_out", False),
+        "cpu_exceeded": result.get("cpu_exceeded", False),
         "truncated": result.get("truncated", False),
         "duration": result.get("duration", 0.0),
         "screenshot": last_frame,  # PNG en base64 (o None si no hubo GUI)

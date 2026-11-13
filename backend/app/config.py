@@ -24,6 +24,13 @@ class Settings:
     # --- Límites de ejecución -------------------------------------------
     # Tiempo máximo (segundos de reloj) que puede vivir un script.
     timeout_seconds: float = _env_float("RUN_TIMEOUT", 10.0)
+    # Tiempo máximo cuando el programa abre una ventana (Tkinter). Se activa
+    # en cuanto aparece la primera ventana; antes rige RUN_TIMEOUT.
+    gui_timeout_seconds: float = _env_float("GUI_TIMEOUT", 120.0)
+    # Segundos de CPU que puede consumir el script. Una app Tkinter esperando
+    # eventos casi no gasta CPU, pero un bucle infinito sí: este límite lo
+    # detiene aunque haya una ventana abierta.
+    cpu_limit_seconds: int = _env_int("CPU_LIMIT", 20)
     # Tamaño máximo del código recibido (bytes).
     max_code_bytes: int = _env_int("MAX_CODE_BYTES", 100_000)
     # Máximo de bytes de salida (stdout + stderr) antes de cortar el proceso.
@@ -47,7 +54,7 @@ class Settings:
     # --- Pantalla virtual -------------------------------------------------
     screen: str = os.getenv("XVFB_SCREEN", "1024x768x24")
     # Cada cuántos segundos se captura la pantalla virtual.
-    frame_interval: float = _env_float("FRAME_INTERVAL", 0.5)
+    frame_interval: float = _env_float("FRAME_INTERVAL", 0.4)
 
     # --- Rutas y red ------------------------------------------------------
     runner_path: Path = Path(__file__).resolve().parent.parent / "sandbox" / "runner.py"

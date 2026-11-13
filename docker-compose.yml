@@ -5,6 +5,8 @@ services:
       - "8000:8000"
     environment:
       RUN_TIMEOUT: "10"            # segundos máximos por ejecución
+      GUI_TIMEOUT: "120"           # segundos máximos si el programa abre una ventana
+      CPU_LIMIT: "20"              # segundos de CPU (frena bucles infinitos)
       MAX_CONCURRENT_RUNS: "4"     # ejecuciones simultáneas (un display X c/u)
       MEMORY_LIMIT_MB: "1024"      # memoria virtual por proceso
       CORS_ORIGINS: "*"            # en producción: tu dominio

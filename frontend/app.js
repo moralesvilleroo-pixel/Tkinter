@@ -46,6 +46,44 @@ root.after(600, tick)
 root.mainloop()
 print("mainloop terminado correctamente")
 `,
+    tk_form: `import tkinter as tk
+from tkinter import ttk
+
+root = tk.Tk()
+root.title("Registro de estudiantes")
+root.geometry("360x230")
+
+frm = ttk.Frame(root, padding=14)
+frm.pack(fill="both", expand=True)
+
+ttk.Label(frm, text="Nombre:").grid(row=0, column=0, sticky="w", pady=4)
+nombre = ttk.Entry(frm, width=28)
+nombre.insert(0, "Ana Gómez")
+nombre.grid(row=0, column=1, pady=4)
+
+ttk.Label(frm, text="Programa:").grid(row=1, column=0, sticky="w", pady=4)
+combo = ttk.Combobox(frm, values=["Sistemas", "Telemática", "Electrónica"], width=25)
+combo.current(1)
+combo.grid(row=1, column=1, pady=4)
+
+activo = tk.BooleanVar(value=True)
+ttk.Checkbutton(frm, text="Estudiante activo", variable=activo).grid(
+    row=2, column=1, sticky="w", pady=4)
+
+barra = ttk.Progressbar(frm, length=220, mode="determinate")
+barra.grid(row=3, column=0, columnspan=2, pady=10)
+
+def avanzar(v=0):
+    barra["value"] = v
+    if v < 100:
+        root.after(150, avanzar, v + 5)
+    else:
+        print("Registro guardado para", nombre.get())
+
+ttk.Button(frm, text="Guardar").grid(row=4, column=1, sticky="e")
+avanzar()
+root.mainloop()
+`,
     tk_canvas: `import tkinter as tk
 import math
 
@@ -96,7 +134,11 @@ while True:
     console: $("console"),
     status: $("status"),
     screenPanel: $("screen-panel"),
-    screen: $("screen"),
+    desktopWrap: $("desktop-wrap"),
+    desktop: $("desktop"),
+    desktopEmpty: $("desktop-empty"),
+    guiTimer: $("gui-timer"),
+    fullscreen: $("btn-fullscreen"),
     metaExit: $("meta-exit"),
     metaTime: $("meta-time"),
     metaServer: $("meta-server"),
@@ -180,11 +222,135 @@ while True:
 
   function clearOutput() {
     els.console.textContent = "";
-    els.screenPanel.hidden = true;
-    els.screen.removeAttribute("src");
+    WindowManager.reset();
     els.metaExit.textContent = "—";
     els.metaTime.textContent = "—";
   }
+
+  // ---------- Ventanas Tkinter ----------
+  /**
+   * Dibuja cada ventana del programa con un marco al estilo de Tkinter en
+   * Windows: icono, título real (root.title()), botones y sombra. El contenido
+   * de todas las ventanas sale de una sola captura PNG: cada ventana muestra
+   * su trozo usando background-position.
+   */
+  const WindowManager = (() => {
+    const TITLEBAR = 30;
+    const nodes = new Map(); // id de ventana X -> elemento DOM
+    let natural = { w: 0, h: 0 };
+
+    const ICON = `<svg class="tk-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M13.5 1.5C8 2 4.5 6 3.2 12.3l1.3.3C5 10.4 6 8.6 7.2 7.2 7.6 9 9 10 11 9.6 9.4 9.3 8.6 8.3 8.6 6.6 10 5.4 11.8 4.6 13.5 4.2 12.3 4 11.2 4.1 10.2 4.5 11.3 3.3 12.4 2.3 13.5 1.5Z" fill="#d6372e"/>
+      <path d="M3.2 12.3 2 14.6" stroke="#8a2b25" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+    const BTN_MIN = `<svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg>`;
+    const BTN_MAX = `<svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg>`;
+    const BTN_CLOSE = `<svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0 0 10" stroke="currentColor"/></svg>`;
+
+    function create(id) {
+      const win = document.createElement("div");
+      win.className = "tkwin";
+      win.innerHTML = `
+        <div class="tk-titlebar">
+          ${ICON}<span class="tk-title"></span>
+          <div class="tk-buttons">
+            <button class="tk-min" title="Minimizar" aria-label="Minimizar">${BTN_MIN}</button>
+            <button class="tk-max" title="Pantalla completa" aria-label="Maximizar">${BTN_MAX}</button>
+            <button class="tk-close" title="Cerrar (detiene el programa)" aria-label="Cerrar">${BTN_CLOSE}</button>
+          </div>
+        </div>
+        <div class="tk-client"></div>`;
+      win.querySelector(".tk-min").onclick = () => { win.classList.toggle("minimized"); fit(); };
+      win.querySelector(".tk-max").onclick = toggleFullscreen;
+      win.querySelector(".tk-close").onclick = () => stop();
+      nodes.set(id, win);
+      els.desktop.appendChild(win);
+      return win;
+    }
+
+    /** Escala el escritorio para que quepa en el panel (sin agrandar en modo normal). */
+    function fit() {
+      if (!natural.w) return;
+      const full = els.screenPanel.classList.contains("fullscreen");
+      const pad = 36;
+      const availW = els.desktopWrap.clientWidth - pad;
+      const availH = full ? els.desktopWrap.clientHeight - pad : Infinity;
+      const scale = Math.min(full ? 2 : 1, availW / natural.w, availH / natural.h);
+      els.desktop.style.width = `${natural.w}px`;
+      els.desktop.style.height = `${natural.h}px`;
+      els.desktop.style.transform = `scale(${scale})`;
+      // transform no cambia el tamaño en el flujo: reservamos el alto escalado
+      els.desktop.style.marginBottom = `${natural.h * (scale - 1)}px`;
+      els.desktop.style.marginLeft = full ? `${Math.max(0, (availW - natural.w * scale) / 2)}px` : "0";
+    }
+
+    function render(frame) {
+      const wins = frame.windows || [];
+      if (!wins.length) {
+        // El programa cerró todas sus ventanas
+        nodes.forEach((n) => n.remove());
+        nodes.clear();
+        natural = { w: 0, h: 0 };
+        els.desktop.removeAttribute("style");
+        els.desktopEmpty.hidden = false;
+        return;
+      }
+      els.desktopEmpty.hidden = true;
+      if (frame.data) {
+        els.desktop.style.setProperty("--frame", `url(data:image/png;base64,${frame.data})`);
+      }
+
+      // La última ventana con marco es la que está encima: la "activa"
+      const activeId = [...wins].reverse().find((w) => w.decorated)?.id;
+      const seen = new Set();
+      let maxW = 0, maxH = 0;
+
+      wins.forEach((w, z) => {
+        seen.add(w.id);
+        const win = nodes.get(w.id) || create(w.id);
+        const bar = w.decorated ? TITLEBAR : 0;
+        win.classList.toggle("plain", !w.decorated);
+        win.classList.toggle("active", w.id === activeId);
+        win.querySelector(".tk-titlebar").hidden = !w.decorated;
+        win.querySelector(".tk-title").textContent = w.title || "tk";
+        win.style.left = `${w.x}px`;
+        win.style.top = `${w.y}px`;
+        win.style.zIndex = String(z + 1);
+        const client = win.querySelector(".tk-client");
+        client.style.width = `${w.w}px`;
+        client.style.height = `${w.h}px`;
+        client.style.backgroundPosition = `-${w.x}px -${w.y}px`;
+        maxW = Math.max(maxW, w.x + w.w + 2);
+        maxH = Math.max(maxH, w.y + w.h + bar + 2);
+      });
+
+      for (const [id, n] of nodes) {
+        if (!seen.has(id)) { n.remove(); nodes.delete(id); }
+      }
+      natural = { w: maxW, h: maxH };
+      fit();
+    }
+
+    function reset() {
+      nodes.forEach((n) => n.remove());
+      nodes.clear();
+      natural = { w: 0, h: 0 };
+      els.desktop.removeAttribute("style");
+      els.desktop.classList.remove("ended");
+      els.desktopEmpty.hidden = true;
+      els.screenPanel.hidden = true;
+      els.screenPanel.classList.remove("fullscreen");
+      els.guiTimer.hidden = true;
+    }
+
+    function toggleFullscreen() {
+      els.screenPanel.classList.toggle("fullscreen");
+      els.fullscreen.textContent = els.screenPanel.classList.contains("fullscreen") ? "⤡" : "⤢";
+      fit();
+    }
+
+    window.addEventListener("resize", fit);
+    return { render, reset, fit, toggleFullscreen };
+  })();
 
   // ---------- Ejecución ----------
   let controller = null;
@@ -196,10 +362,20 @@ while True:
     els.examples.disabled = running;
   }
 
+  let runStart = 0;
+  let guiDeadline = 0; // instante (performance.now) en que se cerrarán las ventanas
+
   function startClock() {
-    const t0 = performance.now();
+    runStart = performance.now();
+    guiDeadline = 0;
     timerId = setInterval(() => {
-      els.metaTime.textContent = `⏱ ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+      const now = performance.now();
+      els.metaTime.textContent = `⏱ ${((now - runStart) / 1000).toFixed(1)} s`;
+      if (guiDeadline) {
+        const left = Math.max(0, Math.ceil((guiDeadline - now) / 1000));
+        els.guiTimer.textContent =
+          `Se cierra en ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+      }
     }, 100);
   }
   function stopClock() { clearInterval(timerId); timerId = null; }
@@ -216,25 +392,36 @@ while True:
       case "stderr":
         write(ev.data, "stderr");
         break;
+      case "gui":
+        // El servidor detectó una ventana y amplió el tiempo límite
+        guiDeadline = runStart + ev.timeout * 1000;
+        els.guiTimer.hidden = false;
+        break;
       case "frame":
-        els.screen.src = `data:image/png;base64,${ev.data}`;
-        if (!ctx.hadGui) {
-          // Primera captura: mostrar el panel y llevarlo a la vista (útil en móvil)
+        if (!ctx.hadGui && ev.windows && ev.windows.length) {
+          // Primera ventana: mostrar el panel y llevarlo a la vista (útil en móvil)
           ctx.hadGui = true;
           els.screenPanel.hidden = false;
-          els.screenPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          requestAnimationFrame(() =>
+            els.screenPanel.scrollIntoView({ behavior: "smooth", block: "nearest" }));
         }
+        WindowManager.render(ev);
         break;
       case "exit": {
         ctx.finished = true;
+        guiDeadline = 0;
+        els.guiTimer.hidden = true;
+        els.desktop.classList.add("ended");
         els.metaExit.textContent = `exit code: ${ev.exit_code}`;
         els.metaTime.textContent = `⏱ ${ev.duration.toFixed(2)} s`;
         if (ev.timed_out) {
           setStatus("timeout", "Tiempo agotado");
           if (ctx.hadGui) {
-            write("ℹ Las ventanas Tkinter se cierran al alcanzar el límite. " +
-                  "Usa root.after(ms, root.destroy) para cerrarlas antes.\n", "system");
+            write("ℹ Las ventanas se cierran al llegar al tiempo límite. " +
+                  "También puedes cerrarlas con ✕ o con el botón Detener.\n", "system");
           }
+        } else if (ev.cpu_exceeded) {
+          setStatus("timeout", "CPU excedida");
         } else if (ev.exit_code === 0) {
           setStatus("ok", "Completado");
           write(`\n[Proceso terminado en ${ev.duration.toFixed(2)} s]\n`, "ok");
@@ -295,6 +482,8 @@ while True:
       if (!ctx.finished) throw new Error("La conexión se cerró antes de terminar.");
     } catch (err) {
       if (err.name === "AbortError") {
+        els.guiTimer.hidden = true;
+        els.desktop.classList.add("ended");
         write("\n■ Ejecución detenida por el usuario.\n", "system");
         setStatus("timeout", "Detenido");
       } else {
@@ -319,7 +508,7 @@ while True:
       const res = await fetch(`${API}/api/health`);
       const h = await res.json();
       els.metaServer.textContent = h.xvfb
-        ? `Servidor: en línea · Xvfb ✓ · límite ${h.timeout_seconds}s`
+        ? `Servidor: en línea · Xvfb ✓ · límite ${h.timeout_seconds}s (ventanas ${h.gui_timeout_seconds}s)`
         : "Servidor: en línea · Xvfb no instalado ✗";
     } catch {
       els.metaServer.textContent = "Servidor: sin conexión ✗";
@@ -329,7 +518,13 @@ while True:
   // ---------- Eventos ----------
   els.run.addEventListener("click", run);
   els.stop.addEventListener("click", stop);
-  els.clear.addEventListener("click", clearOutput);
+  els.clear.addEventListener("click", () => { if (!controller) clearOutput(); else els.console.textContent = ""; });
+  els.fullscreen.addEventListener("click", () => WindowManager.toggleFullscreen());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && els.screenPanel.classList.contains("fullscreen")) {
+      WindowManager.toggleFullscreen();
+    }
+  });
   els.examples.addEventListener("change", (e) => {
     const key = e.target.value;
     if (key && EXAMPLES[key]) setCode(EXAMPLES[key]);

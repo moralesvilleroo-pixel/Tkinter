@@ -39,6 +39,7 @@
         <option value="">Ejemplos…</option>
         <option value="hello">Hola mundo</option>
         <option value="tk_counter">Tkinter: contador</option>
+        <option value="tk_form">Tkinter: formulario (ttk)</option>
         <option value="tk_canvas">Tkinter: Canvas</option>
         <option value="stream">Salida en tiempo real</option>
         <option value="error">Error (traceback)</option>
@@ -65,11 +66,14 @@
     <section class="side">
       <div class="panel screen-panel" id="screen-panel" hidden>
         <div class="panel-head">
-          <span class="panel-title">Pantalla virtual (Tkinter)</span>
-          <span class="hint">Vista en vivo · solo lectura</span>
+          <span class="panel-title">Ventanas</span>
+          <span id="gui-timer" class="gui-timer" hidden></span>
+          <button id="btn-fullscreen" class="icon-btn" title="Pantalla completa" aria-label="Pantalla completa">⤢</button>
         </div>
-        <div class="screen">
-          <img id="screen" alt="Captura de la ventana Tkinter" />
+        <!-- "Escritorio" donde se dibuja cada ventana Tkinter con su marco -->
+        <div class="desktop-wrap" id="desktop-wrap">
+          <div class="desktop" id="desktop" role="img" aria-label="Ventanas del programa"></div>
+          <p class="desktop-empty" id="desktop-empty" hidden>Todas las ventanas se cerraron.</p>
         </div>
       </div>
       <div class="panel console-panel">

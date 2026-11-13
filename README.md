@@ -18,9 +18,9 @@ Aplicación web para escribir y ejecutar código Python desde el navegador, **in
          ▼  setrlimit + sesión propia + entorno mínimo
    xvfb-run -n :10X  python -I runner.py main.py …
          │      ├─ Xvfb (pantalla virtual 1024x768)
-         │      └─ runner.py
-         │           ├─ ejecuta main.py (tk.Tk(), mainloop()…)
-         │           └─ hilo que captura la pantalla → frames/latest.png
+         │      └─ runner.py → ejecuta main.py (tk.Tk(), mainloop()…)
+         │           └─ capture.py (proceso aparte): lista las ventanas X
+         │              (título, posición, tamaño) + captura → frames/latest.json
          ▼
    Timeout / exceso de salida / cliente cancela → killpg (SIGTERM → SIGKILL)
 ```
@@ -30,7 +30,8 @@ Decisiones clave:
 | Problema | Solución |
 |---|---|
 | Tkinter necesita una pantalla | `xvfb-run` crea un servidor X virtual por ejecución |
-| Ver la ventana en el navegador | `runner.py` captura el display con Pillow (`ImageGrab`), lo recorta a las ventanas y el backend lo envía en base64 |
+| Ver la ventana en el navegador | `capture.py` lee con libX11 (ctypes) las ventanas abiertas y su contenido; el navegador dibuja cada una con barra de título, icono y botones como en Windows |
+| Apps Tkinter que esperan eventos | Al aparecer una ventana, el límite pasa de `RUN_TIMEOUT` a `GUI_TIMEOUT`; `CPU_LIMIT` sigue frenando bucles infinitos |
 | Salida en tiempo real | `PYTHONUNBUFFERED=1` + respuesta **NDJSON** leída con `fetch` + `ReadableStream` |
 | `xvfb-run` mezcla stderr con stdout (`2>&1`) | Pipe extra que el runner coloca como su descriptor 2 (`os.dup2`) |
 | Ejecuciones simultáneas | Pool de displays (`:100`, `:101`…) en vez de `-a` (que tiene condiciones de carrera) |
@@ -49,7 +50,8 @@ pyrunner/
 │   │   ├── executor.py   # motor de ejecución con Xvfb
 │   │   └── main.py       # API FastAPI + servidor del frontend
 │   ├── sandbox/
-│   │   └── runner.py     # envoltorio que corre dentro de xvfb-run
+│   │   ├── runner.py     # envoltorio que corre dentro de xvfb-run
+│   │   └── capture.py    # lee ventanas y capturas del display virtual
 │   └── requirements.txt
 ├── frontend/
 │   ├── index.html
@@ -91,8 +93,12 @@ Petición: `{"code": "print('hola')"}`. La respuesta es `application/x-ndjson`, 
 {"type": "start",  "display": 100, "timeout": 10}
 {"type": "stdout", "data": "hola\n"}
 {"type": "stderr", "data": "Traceback …"}
-{"type": "frame",  "data": "<PNG en base64>"}
-{"type": "exit",   "exit_code": 0, "timed_out": false, "truncated": false, "duration": 0.31}
+{"type": "gui",    "timeout": 120}
+{"type": "frame",  "data": "<PNG base64>", "width": 360, "height": 230,
+                   "windows": [{"id": 2097153, "title": "Contador", "x": 0, "y": 0,
+                                "w": 320, "h": 180, "decorated": true}]}
+{"type": "exit",   "exit_code": 0, "timed_out": false, "cpu_exceeded": false,
+                   "truncated": false, "duration": 0.31}
 ```
 
 ### `POST /api/run` (resultado completo)
@@ -115,7 +121,9 @@ Indica si `xvfb-run` está disponible y los límites configurados. La documentac
 
 | Variable | Defecto | Descripción |
 |---|---|---|
-| `RUN_TIMEOUT` | `10` | Segundos máximos por ejecución |
+| `RUN_TIMEOUT` | `10` | Segundos máximos por ejecución sin ventanas |
+| `GUI_TIMEOUT` | `120` | Segundos máximos cuando el programa abre una ventana |
+| `CPU_LIMIT` | `20` | Segundos de CPU por proceso (detiene bucles infinitos) |
 | `MAX_CONCURRENT_RUNS` | `4` | Ejecuciones simultáneas |
 | `QUEUE_WAIT_SECONDS` | `5` | Espera por un hueco antes de responder 503 |
 | `MAX_CODE_BYTES` | `100000` | Tamaño máximo del código |
@@ -124,7 +132,7 @@ Indica si `xvfb-run` está disponible y los límites configurados. La documentac
 | `FILE_SIZE_LIMIT_MB` | `10` | Tamaño máximo de archivo escrito |
 | `NPROC_LIMIT` | `0` | `RLIMIT_NPROC` (0 = desactivado) |
 | `XVFB_SCREEN` | `1024x768x24` | Resolución de la pantalla virtual |
-| `FRAME_INTERVAL` | `0.5` | Segundos entre capturas |
+| `FRAME_INTERVAL` | `0.4` | Segundos entre capturas |
 | `CORS_ORIGINS` | `*` | Orígenes permitidos, separados por comas |
 
 ## Seguridad: lo que hay y lo que falta
@@ -140,6 +148,6 @@ Ya incluido: timeout, límites de CPU, memoria, tamaño de archivos y salida, en
 ## Limitaciones y siguientes pasos
 
 - La vista Tkinter es **de solo lectura** (capturas periódicas). Para interactuar con clics y teclado, el siguiente paso es `x11vnc` + **noVNC** por WebSocket.
-- Las apps Tkinter se cierran al llegar al timeout; en los ejemplos se usa `root.after(ms, root.destroy)`.
+- Las apps Tkinter se cierran al llegar a `GUI_TIMEOUT` (120 s por defecto), con ✕ o con **Detener**.
 - `input()` no recibe datos. Se puede añadir un campo "stdin" en el frontend y pasarlo al proceso.
 - Solo librería estándar + Pillow. Para más paquetes, añádelos en `requirements.txt`.

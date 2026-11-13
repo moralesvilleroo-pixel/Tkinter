@@ -62,6 +62,7 @@ class RunResult(BaseModel):
     stderr: str
     exit_code: int | None
     timed_out: bool
+    cpu_exceeded: bool = False
     truncated: bool
     duration: float
     screenshot: str | None = Field(None, description="Última captura PNG en base64")
@@ -76,6 +77,7 @@ async def health() -> dict:
         "status": "ok",
         "xvfb": shutil.which("xvfb-run") is not None,
         "timeout_seconds": settings.timeout_seconds,
+        "gui_timeout_seconds": settings.gui_timeout_seconds,
         "max_concurrent_runs": settings.max_concurrent_runs,
     }
 
